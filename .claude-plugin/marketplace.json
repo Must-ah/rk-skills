@@ -1,0 +1,14 @@
+{
+  "name": "rk-skills",
+  "description": "Marketplace for rk-skills: Richard Kuo's personal Claude Code skill collection.",
+  "owner": {
+    "name": "Richard Kuo"
+  },
+  "plugins": [
+    {
+      "name": "rk-skills",
+      "source": "./",
+      "description": "Richard Kuo's personal Claude Code skills: GitHub issue/PR/release workflow automation and Fable-driven planning."
+    }
+  ]
+}

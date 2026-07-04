@@ -37,6 +37,16 @@ mkdir -p ~/.claude/skills/work-on-issue && \
   -o ~/.claude/skills/work-on-issue/SKILL.md
 ```
 
+## Install (with npx)
+
+Copy every skill into your personal `~/.claude/skills/` with one command — no marketplace, no clone:
+
+```sh
+npx rk-skills
+```
+
+Add `--project` to install into the current repo's `.claude/skills/` instead. This path is copy-based — re-run it to update — whereas the plugin above auto-updates. It installs the **skills only**; not `CLAUDE.md` (my personal global config) or the `/commit` command.
+
 ## Restore on a new machine (my setup)
 
 Clone this repo, then run `./install.sh`. It symlinks every tracked item into `~/.claude`, backing up any existing real file to `<name>.bak` first. It only ever replaces symlinks — it never deletes your data.

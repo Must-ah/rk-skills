@@ -1,6 +1,6 @@
 ---
 name: fix-pr-review
-description: Use when the user asks to fix, address, or respond to a PR review — "fix the PR review", "address the review comments", "/fix-pr-review". Takes an optional PR number/URL (defaults to the current branch's PR). Fetches all unaddressed review feedback on the PR (formal reviews, review-style issue comments, and inline diff comments), RE-VALIDATES every finding against the actual code before touching anything (never blind-implements), fixes the findings that survive validation, and for judgment calls and optional improvements derives and implements the absolute-best solution autonomously without pausing, then commits and pushes, posts a per-finding disposition comment back to the PR, and triggers a fresh @claude re-review.
+description: Use when the user asks to fix, address, or respond to a PR review — "fix the PR review", "address the review comments", "/fix-pr-review". Takes an optional PR number/URL (defaults to the current branch's PR). Fetches all unaddressed review feedback on the PR (formal reviews, review-style issue comments, and inline diff comments), RE-VALIDATES every finding against the actual code before touching anything (never blind-implements), fixes the findings that survive validation, and for judgment calls and optional improvements derives and implements the absolute-best solution autonomously without pausing, resolves any merge conflicts with the base branch, then commits and pushes, posts a per-finding disposition comment back to the PR, and triggers a fresh @claude re-review.
 ---
 
 # fix-pr-review
@@ -22,7 +22,7 @@ If the current branch has no PR and none was given, say so and stop — there's 
 ### 0. Resolve the PR and sync the branch
 
 ```bash
-gh pr view <N|--> --json number,headRefName,headRepositoryOwner,baseRefName,url,state,isDraft
+gh pr view <N|--> --json number,headRefName,headRepositoryOwner,baseRefName,url,state,isDraft,mergeable,mergeStateStatus
 git fetch origin
 git branch --show-current
 ```
@@ -31,6 +31,7 @@ git branch --show-current
 - Note whether the PR is from a **fork** (`headRepositoryOwner` differs from the base repo's owner) — the head branch then lives in the fork, so pulls and pushes go to the branch's tracked upstream, not `origin`.
 - Pull the latest head so you fix against what the reviewer saw: `git pull --ff-only` on the tracked upstream (if it can't fast-forward, stop and tell the user the branch diverged).
 - Note the PR state. If it's already `merged` or `closed`, stop and report — don't reopen work on a closed PR without the user.
+- Note `mergeable`/`mergeStateStatus`. If the PR is `CONFLICTING`/`DIRTY`, resolving the conflict is part of this run (step 4.5) — a reviewed PR that can't merge isn't done.
 
 ### 1. Fetch all unaddressed review feedback
 
@@ -60,7 +61,7 @@ State what you picked (authors + timestamps) so the user can confirm it's the ri
 
 **Note whether the collected set contains any blocking finding** — a `Needs Fixing` or `Requires Human Review` item from any review, or an inline thread asserting a real defect (classified in step 2). This drives the re-review routing in step 7.
 
-**If the only new feedback is `LGTM` with no blocking sections:** there's nothing blocking, but still address any non-blocking items the review raised — implement each `Recommended Optional` item with the absolute-best-solution standard (step 4), and file each `Create Follow-up Issue` item as a GitHub issue. Don't invent work the review never raised; if the feedback is a bare `LGTM` with no items at all and no open inline threads, report that the PR is approved and stop.
+**If the only new feedback is `LGTM` with no blocking sections:** there's nothing blocking, but still address any non-blocking items the review raised — implement each `Recommended Optional` item with the absolute-best-solution standard (step 4), and file each `Create Follow-up Issue` item as a GitHub issue. Don't invent work the review never raised; if the feedback is a bare `LGTM` with no items at all and no open inline threads, report that the PR is approved and stop — unless step 0 flagged merge conflicts, in which case still run step 4.5 (resolve, verify, push, disposition comment) so the approved PR is actually mergeable.
 
 ### 2. Extract findings
 
@@ -119,6 +120,21 @@ Implement every finding that calls for a change: ✅ Confirmed, ⚠️ Partial (
 - Keep each fix scoped to its finding; don't smuggle in unrelated refactors. (Scope ≠ minimalism: for Judgment and Optional items, pick the *best* design, not the smallest diff — correctness and robustness outrank brevity.)
 - After all fixes, **verify**: run the project's tests/build/lint (check the repo's `CLAUDE.md` / `package.json` / Makefile for the commands — e.g. `bun test`, `go test -race ./...`, `bun run build`). Evidence before assertions: do not claim a fix works without running verification, and report any failures honestly rather than papering over them.
 - If a fix turns out infeasible or reveals the finding was actually Refuted, move it to the Refuted bucket with the reason.
+
+### 4.5 Resolve merge conflicts with the base branch
+
+If step 0 flagged the PR as conflicting (or the push in step 5 gets rejected because the base moved), resolve the conflicts on the head branch — never on the base:
+
+```bash
+git fetch origin <baseRefName>
+git merge origin/<baseRefName>        # merge base INTO the head branch; don't rebase a pushed PR branch
+```
+
+- Resolve each conflicted file by reading both sides and preserving the *intent* of both changes — never mechanically take `ours`/`theirs` for a whole file. If base-branch changes overlap the code you just fixed, re-derive the fix on top of the new base code.
+- Conflicts touching money, data integrity, security, or auto-protective logic get the same safety carve-out as findings: resolve from first principles, and if the two sides are genuinely irreconcilable in intent, stop and surface to the user rather than guessing.
+- After resolving, re-run the step 4 verification (tests/build/lint) — a textual resolution can still be semantically wrong.
+- Prefer merge over rebase: the branch is already pushed and reviewed; rebasing rewrites history and breaks the reviewer's context and any pending inline threads.
+- Report the conflict resolution as its own line in the disposition comment and the user report (which files, how each side was reconciled).
 
 ### 5. Commit and push
 
@@ -219,6 +235,8 @@ Terse summary: which reviews/threads you acted on, counts per disposition (fixed
 | All findings refuted | Still post the disposition comment with the rebuttals and request re-review — don't silently no-op |
 | `Requires Human Review` item | Derive and **implement** the absolute-best solution (ignore cost/effort/time/resources; only correctness and safety override "best"); document the decision + rejected alternatives in the comment so the user can override. Never pause for confirmation, punt the bare tradeoff, or guess blindly |
 | Tests/build fail after fixes | Report the failure; don't push or claim success |
+| PR is `CONFLICTING` with the base branch | Resolve via step 4.5 (merge base into head, reconcile intent of both sides, re-verify) — never rebase a pushed PR branch, never resolve by blanket `ours`/`theirs`, never leave an approved PR unmergeable |
+| Conflict sides are irreconcilable in intent (esp. money/data/security/auto-protective code) | Stop and surface to the user instead of guessing a resolution |
 
 ## Common Mistakes
 
@@ -233,4 +251,5 @@ Terse summary: which reviews/threads you acted on, counts per disposition (fixed
 - **Skipping verification before push.** Run the tests/build; report real results.
 - **Pausing or punting on a judgment call.** Do the analysis the reviewer couldn't and *implement* the absolute-best solution (cost/effort/time/resources are not factors; only correctness and safety override it); document it for override. Don't stop to ask, don't relay the bare tradeoff, don't guess blindly.
 - **Skipping the optional improvements.** `Recommended Optional` items get implemented to the same best-solution standard, not deferred.
+- **Ignoring merge conflicts because "the review is addressed".** An unmergeable PR isn't done — check `mergeable` in step 0 and resolve conflicts in step 4.5, with the same verification and safety discipline as findings.
 - **Bundling the re-review trigger into the disposition comment.** Keep `@claude review` as its own comment so the bot fires reliably.

@@ -56,13 +56,14 @@ Fetch the latest review and classify it exactly like fix-pr-review steps 1–2: 
 
 Evaluate in this order:
 
+0. **Merge conflict check.** Before evaluating the verdict, check `gh pr view <N> --json mergeable,mergeStateStatus`. If the PR is `CONFLICTING`/`DIRTY`, it can't be terminal regardless of verdict — invoke fix-pr-review (step 4) so it resolves the conflict, even on a bare LGTM.
 1. **Clean pass — stop, success.** Verdict is `LGTM` and **no sections at all** — nothing under Recommended Optional or Create Follow-up Issue either. Nothing left to fix, at any `review_count`. Go to step 5.
 2. **Past the cap and it's an LGTM — stop, first one wins.** `review_count > 5` **and** verdict is `LGTM` (even with Recommended Optional / Create Follow-up Issue items still listed). Once the loop has run more than 5 cycles, the first LGTM it sees ends it — don't spend a 6th+ fix-pr-review cycle chasing non-blocking findings. Go to step 5.
 3. **Otherwise — keep going.** Verdict is `Needs Updates` (at any `review_count` — there is no cycle count that alone stops a `Needs Updates` PR; only an LGTM does, per rules 1–2), or verdict is `LGTM` with findings still listed and `review_count <= 5`. Continue to step 4.
 
 ### 4. Resolve the review and loop
 
-Invoke the `fix-pr-review` skill for the PR (Skill tool, `skill: fix-pr-review`). It re-validates every finding against the code, fixes what's real, implements the judgment calls and optional improvements to the best-solution standard, commits, pushes, posts the disposition comment, and triggers a fresh `@claude` review itself (routed to Sonnet when it addressed only non-blocking items, otherwise to the repo default, per fix-pr-review step 7).
+Invoke the `fix-pr-review` skill for the PR (Skill tool, `skill: fix-pr-review`). It re-validates every finding against the code, fixes what's real, implements the judgment calls and optional improvements to the best-solution standard, resolves any merge conflicts with the base branch (its step 4.5), commits, pushes, posts the disposition comment, and triggers a fresh `@claude` review itself (routed to Sonnet when it addressed only non-blocking items, otherwise to the repo default, per fix-pr-review step 7).
 
 fix-pr-review also picks its own working model dynamically (its step 3.5): it always validates the findings inline on the session model, then tiers implementation by the complexity of the most complex surviving fix — open judgment calls and safety-class findings stay inline, any non-trivial fix routes the set to an Opus subagent, and all-mechanical work goes to a Sonnet subagent. It decides from the validated findings itself, so don't override its choice — just record which model each cycle reported running on, for the step 5 report.
 
@@ -104,4 +105,5 @@ In every case, give: PR URL, number of review cycles run, final verdict, which m
 - **Losing count across cycles.** Track `review_count` explicitly — it's what distinguishes "full fix cycle" from "first-LGTM-wins" behavior.
 - **Polling synchronously forever.** Use an until-loop with a timeout so a non-responding bot doesn't hang the whole run.
 - **Re-triggering review on top of fix-pr-review's own trigger.** fix-pr-review already posts its own re-review trigger as a separate comment (its step 7) — don't add a second one here.
+- **Stopping on an LGTM while the PR is unmergeable.** A conflicting PR isn't done — the merge-conflict check in step 3 runs before the verdict rules, and fix-pr-review resolves the conflict.
 - **Triggering `@claude review` when feedback is already sitting on the PR.** Check for existing unaddressed feedback in step 1 first; a redundant trigger just delays convergence.

@@ -49,6 +49,11 @@ jobs:
           prompt: |
             Review this pull request. Inspect every changed file in the diff.
 
+            This is a static review: read the code only. Do NOT execute the
+            project's code — never run test suites, backtests, builds,
+            simulations, or scripts. Judge correctness by reading the diff;
+            CI runs tests separately.
+
             Before writing the comment, sweep the FULL diff once per dimension
             and collect every finding — do not stop at the first or most
             salient issue. Dimensions: (1) correctness and logic (including

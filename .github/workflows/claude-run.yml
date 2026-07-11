@@ -13,7 +13,7 @@ name: Claude Code run
 #     substitutes for the shared prompt entirely — for repos whose base prompt
 #     carries safety-hardened language the shared text lacks.
 #   - append:  .github/prompts/<prompt-name>-local.md (e.g.
-#     fix-pr-review-local.md) is appended to whichever base was chosen.
+#     fix-pr-local.md) is appended to whichever base was chosen.
 # Both override files are read from the repo's DEFAULT BRANCH, never the event
 # checkout, so a fork PR can never supply the prompt for its own review run.
 # Runner, timeout, toolchain, and allowlist divergences are expressed via the
@@ -34,18 +34,18 @@ name: Claude Code run
 #                were made.
 #   - fix-pr:    app auth (claude[bot]) with contents: write; routes to the
 #                fix-pr prompt, which checks out the triggering PR's own branch,
-#                makes the requested changes in place, and pushes to it (never
-#                opens a new PR). Only reached for trusted-author PRs (gated in
+#                fetches all unaddressed review feedback (formal reviews,
+#                review comments, unresolved inline threads), validates each
+#                finding against the code, fixes what survives, folds in any
+#                additional instructions carried by the triggering comment,
+#                posts a disposition comment, and triggers a re-review — never
+#                opens a new PR. Only reached for trusted-author PRs (gated in
 #                claude.yml), so the write happens over a trusted diff.
-#   - fix-pr-review: same auth/permissions/gating as fix-pr, but routes to the
-#                review-fixing playbook prompt (validate all review feedback
-#                against the code, fix what survives, disposition comment,
-#                re-review trigger).
 on:
   workflow_call:
     inputs:
       mode:
-        description: 'review, implement, fix-pr, or fix-pr-review'
+        description: 'review, implement, or fix-pr (fix-pr-review is a deprecated alias for fix-pr)'
         required: true
         type: string
       flow:
@@ -238,27 +238,27 @@ jobs:
             PROMPT_FILE=$PROMPTS_DIR/issue-workflow.md
             # Edit/Write/Skill needed to validate, edit the issue, and implement.
             ALLOWED='Bash(git *),Bash(gh *),Read,Edit,Write,MultiEdit,Glob,Grep,Skill,EnterWorktree'
-          elif [ "$MODE" = "fix-pr" ]; then
-            # In-place PR fix: check out the PR's branch, edit, commit, push to it.
-            # Reached only for trusted-author PRs (gated in claude.yml), so the
-            # diff being read is trusted; the allowlist is intent, not a hard
+          elif [ "$MODE" = "fix-pr" ] || [ "$MODE" = "fix-pr-review" ]; then
+            # fix-pr-review is a deprecated alias for fix-pr: consumer repos
+            # with an older vendored claude.yml still pass it, and this file is
+            # fetched live from @main — dropping the branch would silently
+            # route their review-fixing runs to the read-only review prompt.
+            # Review-fixing playbook: check out the PR's branch, fetch and
+            # validate all unaddressed review feedback, fix what survives, fold
+            # in any additional instructions from the triggering comment, and
+            # push to the existing branch. Reached only for trusted-author PRs
+            # (gated in claude.yml), so the diff being read is trusted; the
+            # allowlist is intent, not a hard boundary (gh api graphql can
+            # express mutations too) — the trust gate in claude.yml is the
             # boundary. No interpreters or build/test runners: the agent never
-            # executes the project's code. Push verbs are exact-match
-            # (no trailing wildcard) so a refspec or --force does not match, and
-            # there is no gh api (its --method flag reaches every mutating
-            # endpoint). No EnterWorktree/Skill: this path never opens a new PR or
-            # runs the issue workflow — it pushes to the existing PR branch.
+            # executes the project's code. Push verbs are exact-match (no
+            # trailing wildcard) so a refspec or --force does not match. gh api
+            # graphql is needed because inline review threads carry resolution
+            # state only via GraphQL; gh issue create files Create Follow-up
+            # Issue dispositions. No EnterWorktree/Skill: this path never opens
+            # a new PR or runs the issue workflow — it pushes to the existing
+            # PR branch.
             PROMPT_FILE=$PROMPTS_DIR/fix-pr.md
-            ALLOWED='Bash(wc *),Bash(ls *),Bash(git status*),Bash(git log*),Bash(git diff*),Bash(git show*),Bash(git fetch*),Bash(git branch*),Bash(git rev-parse*),Bash(git checkout*),Bash(git switch*),Bash(git add*),Bash(git commit*),Bash(git push origin HEAD),Bash(gh pr checkout*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Bash(gh issue view*),Read,Edit,Write,MultiEdit,Glob,Grep'
-          elif [ "$MODE" = "fix-pr-review" ]; then
-            # Review-fixing playbook: fix-pr's allowlist plus gh api graphql
-            # (inline review threads carry resolution state only via GraphQL)
-            # and gh issue create (Create Follow-up Issue dispositions). Like
-            # fix-pr this path is trusted-author only and the allowlist is
-            # intent, not a hard boundary (graphql can express mutations) — the
-            # trust gate in claude.yml is the boundary. No interpreters or
-            # build/test runners: the agent never executes the project's code.
-            PROMPT_FILE=$PROMPTS_DIR/fix-pr-review.md
             ALLOWED='Bash(wc *),Bash(ls *),Bash(git status*),Bash(git log*),Bash(git diff*),Bash(git show*),Bash(git fetch*),Bash(git branch*),Bash(git rev-parse*),Bash(git checkout*),Bash(git switch*),Bash(git add*),Bash(git commit*),Bash(git push origin HEAD),Bash(gh pr checkout*),Bash(gh pr view*),Bash(gh pr diff*),Bash(gh pr comment*),Bash(gh issue view*),Bash(gh issue create*),Bash(gh api graphql*),Read,Edit,Write,MultiEdit,Glob,Grep'
           else
             PROMPT_FILE=$PROMPTS_DIR/pr-review-format.md
@@ -314,13 +314,29 @@ jobs:
           PROMPT_NAME=$(basename "$PROMPT_FILE")
           REPLACEMENT_PATH=".github/prompts/$PROMPT_NAME"
           LOCAL_PATH=".github/prompts/$(basename "$PROMPT_FILE" .md)-local.md"
+          # Deprecated-alias override fallback: a consumer still emitting
+          # mode=fix-pr-review may have authored fix-pr-review(-local).md
+          # overrides under the old prompt name. Honor them as a FALLBACK only
+          # — the new fix-pr(-local).md names win when both exist — so the
+          # alias preserves the documented override extension point, not just
+          # the base prompt.
+          LEGACY_REPLACEMENT_PATH=""
+          LEGACY_LOCAL_PATH=""
+          if [ "$MODE" = "fix-pr-review" ]; then
+            LEGACY_REPLACEMENT_PATH=".github/prompts/fix-pr-review.md"
+            LEGACY_LOCAL_PATH=".github/prompts/fix-pr-review-local.md"
+          fi
           if [ -n "$TRUSTED_REF" ] && git cat-file -e "$TRUSTED_REF:$REPLACEMENT_PATH" 2>/dev/null; then
             PROMPT=$(git show "$TRUSTED_REF:$REPLACEMENT_PATH" | flatten)
+          elif [ -n "$TRUSTED_REF" ] && [ -n "$LEGACY_REPLACEMENT_PATH" ] && git cat-file -e "$TRUSTED_REF:$LEGACY_REPLACEMENT_PATH" 2>/dev/null; then
+            PROMPT=$(git show "$TRUSTED_REF:$LEGACY_REPLACEMENT_PATH" | flatten)
           else
             PROMPT=$(flatten < "$PROMPT_FILE")
           fi
           if [ -n "$TRUSTED_REF" ] && git cat-file -e "$TRUSTED_REF:$LOCAL_PATH" 2>/dev/null; then
             PROMPT="$PROMPT $(git show "$TRUSTED_REF:$LOCAL_PATH" | flatten)"
+          elif [ -n "$TRUSTED_REF" ] && [ -n "$LEGACY_LOCAL_PATH" ] && git cat-file -e "$TRUSTED_REF:$LEGACY_LOCAL_PATH" 2>/dev/null; then
+            PROMPT="$PROMPT $(git show "$TRUSTED_REF:$LEGACY_LOCAL_PATH" | flatten)"
           fi
           # claude_args is shell-evaluated downstream: a double quote breaks the
           # quoting, and a backtick or dollar sign would expand or execute. The

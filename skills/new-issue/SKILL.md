@@ -48,7 +48,7 @@ Include **acceptance criteria** an implementer can verify: observable behavior, 
 
 ### 4. Score complexity
 
-Score the work to implement the fix **correctly, including tests** — five axes 0–4 (Scope, Coupling, Risk, Uncertainty, Verification), sum ×5 for a 0–100 base, risk floor: Risk 4 → ≥60, Risk 3 → ≥45. Derive the axes from the concrete touch-set in step 3, not vibes; count the surface that hides from the diff (tests, parity/offline paths, migrations, docs). This is complexity, **not** a time or effort estimate — never put durations in the issue.
+Score the work to implement the fix **correctly, including tests** using the **canonical formula in `validate-issue` step 6** (load that skill or mirror it exactly): five axes 0–4 → **Capability** (0–3 from Risk/Uncertainty + Coupling≥3 bump) and **Volume** (0–24 from Scope+Coupling+Verification) → `score = 25 × Capability + Volume`. The score is a **model + effort routing signal**, not a time estimate — never put durations in the issue. Derive axes from the concrete touch-set in step 3, not vibes; count the surface that hides from the diff (tests, parity/offline paths, migrations, docs).
 
 ### 5. Scope check — one issue or several?
 
@@ -61,7 +61,7 @@ Title: `[C<score>] <title>` — the title is a clear, plain-language sentence un
 Body structure:
 
 ```
-**Complexity: <score>/100** — scope: <…>; risk: <…>; uncertainty: <…>
+**Complexity: <score>/100** — Capability <k> (<driver>); Volume <v> — <model/effort from band>
 
 ## Problem
 <Current behavior, grounded with file:line citations from step 2. What's wrong or missing and why it matters.>
@@ -80,7 +80,7 @@ Body structure:
 Created with LLM: <current model> | <effort> | Harness: <harness>
 ```
 
-The complexity rationale is the **first line** of the body and matches the title prefix. The footer is the final lines, preceded by `---` on its own line — **Created** verb, `<effort>` one of `medium`/`high`/`xhigh` (default `high`, never low), `<harness>` = `Claude Code` for an interactive session. No `Co-authored-by`. **Project precedence:** a repo `CLAUDE.md` that defines its own issue/footer format overrides this default.
+The complexity rationale is the **first line** of the body and matches the title prefix — same Capability/Volume form as `github-issue-format` (round-trips with the `[C<score>]` band, e.g. `[C58]` → `Capability 2 (…); Volume 8`). The footer is the final lines, preceded by `---` on its own line — **Created** verb, `<effort>` one of `medium`/`high`/`xhigh` (default `high`, never low), `<harness>` = `Claude Code` for an interactive session. No `Co-authored-by`. **Project precedence:** a repo `CLAUDE.md` that defines its own issue/footer format overrides this default.
 
 File it:
 
@@ -105,5 +105,5 @@ Terse: issue URL, number, one-line summary of what it covers, complexity score, 
 | An existing open issue/PR already covers it | Stop; surface it and offer to update/comment instead |
 | The cheap design and the correct design diverge | Spec the correct one; cost, effort, and blast radius are not factors — only correctness and safety constrain |
 | Touches money / data integrity / security / auto-protective logic | Spec the safest correct design from first principles; surface the risk in the body and Risk axis |
-| Tempted to include a time/effort estimate | Don't — complexity score only, described via scope/risk/uncertainty |
+| Tempted to include a time/effort estimate | Don't — complexity score only (Capability band + Volume), described via the axes |
 | Repo has its own issue template or `CLAUDE.md` issue format | Follow the repo's format; it overrides this default |

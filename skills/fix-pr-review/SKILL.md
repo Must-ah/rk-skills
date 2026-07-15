@@ -1,6 +1,6 @@
 ---
 name: fix-pr-review
-description: Use when the user asks to fix, address, or respond to a PR review — "fix the PR review", "address the review comments", "/fix-pr-review". Takes an optional PR number/URL (defaults to the current branch's PR). Fetches all unaddressed review feedback on the PR (formal reviews, review-style issue comments, and inline diff comments), RE-VALIDATES every finding against the actual code before touching anything (never blind-implements), fixes the findings that survive validation, and for judgment calls and optional improvements derives and implements the absolute-best solution autonomously without pausing, resolves any merge conflicts with the base branch, then commits and pushes, posts a per-finding disposition comment back to the PR, and triggers a fresh @claude re-review.
+description: Use when the user asks to fix, address, or respond to a PR review — "fix the PR review", "address the review comments", "/fix-pr-review". Takes an optional PR number/URL (defaults to the current branch's PR). Fetches all unaddressed review feedback on the PR (formal reviews, review-style issue comments, inline diff comments, and any already-failed CI checks), RE-VALIDATES every finding against the actual code before touching anything (never blind-implements), fixes the findings that survive validation, and for judgment calls and optional improvements derives and implements the absolute-best solution autonomously without pausing, resolves any merge conflicts with the base branch, then commits and pushes, posts a per-finding disposition comment back to the PR, and triggers a fresh @claude re-review.
 ---
 
 # fix-pr-review
@@ -59,19 +59,35 @@ Determine the **cutoff**: the timestamp of your most recent disposition comment 
 
 State what you picked (authors + timestamps) so the user can confirm it's the right set.
 
-**Note whether the collected set contains any blocking finding** — a `Needs Fixing` or `Requires Human Review` item from any review, or an inline thread asserting a real defect (classified in step 2). This drives the re-review routing in step 7.
+**Note whether the collected set contains any blocking finding** — a `Needs Fixing` or `Requires Human Review` item from any review, an inline thread asserting a real defect (classified in step 2), or any failing CI check from step 1.5. This drives the re-review routing in step 7.
 
 **If the only new feedback is `LGTM` with no blocking sections:** there's nothing blocking, but still address any non-blocking items the review raised — implement each `Recommended Optional` item with the absolute-best-solution standard (step 4), and file each `Create Follow-up Issue` item as a GitHub issue. Don't invent work the review never raised; if the feedback is a bare `LGTM` with no items at all and no open inline threads, report that the PR is approved and stop — unless step 0 flagged merge conflicts, in which case still run step 4.5 (resolve, verify, push, disposition comment) so the approved PR is actually mergeable.
 
+### 1.5 Fetch failing CI checks
+
+Take one snapshot of check status — this is a point-in-time read, never a wait or a poll. A check that's still running is simply not this run's problem; it'll be there to catch on the next pass.
+
+```bash
+gh pr checks <N> --json name,state,bucket,link,startedAt,completedAt
+```
+
+`bucket` normalizes `state` into `pass`/`fail`/`pending`/`skipping`/`cancel`:
+- `bucket: pending` or `skipping` — **skip it entirely.** Don't wait for it, don't retry the call, don't treat "not done yet" as a finding.
+- `bucket: cancel` — skip unless the run log shows it was cancelled by a real failure upstream (e.g. a required prior job failed) rather than a manual/administrative cancel. When it was, check this same snapshot for a `bucket: fail` entry on that upstream job first: if one exists, skip the cancelled check entirely — the `fail`-bucket path below already turns that upstream job into its own CI Failure finding, and citing both would duplicate it. Only when the real upstream failure is *not* otherwise visible as its own `fail`-bucket entry in this snapshot does the cancelled check get a finding of its own. To source the detail concretely, resolve the run ID from the cancelled check's `link` and run `gh run view <run-id>` — that lists every job in the same workflow run with its conclusion, so a job that failed there but isn't surfaced as its own PR check shows up; pull its failing detail via the `fail`-bucket procedure below and cite that job's name (not the cancelled one). If even that yields no concrete failed job, don't invent an upstream cause — record the finding against the cancelled check's own name with its run link and flag it for human review, rather than guessing at an unverified cause.
+- For each check with `bucket: fail`, pull just the failing detail, not the whole log:
+  - GitHub Actions: resolve the run ID from the check's `link`, then `gh run view <run-id> --log-failed` for the failing step(s) only.
+  - Non-Actions / external CI: `gh api` only auto-fills `{owner}`/`{repo}`/`{branch}` — `{sha}` is not one of them, so get the head commit explicitly first: `gh pr view <N> --json headRefOid --jq .headRefOid`. Substitute that for `<sha>`: `gh api repos/{owner}/{repo}/commits/<sha>/check-runs --jq '.check_runs[] | select(.conclusion=="failure") | {name, output}'` for whatever summary the provider publishes.
+- Each failing check becomes one finding: **CI Failure — `<check name>`**.
+
 ### 2. Extract findings
 
-Parse all collected feedback — structured reviews and inline diff threads alike — into discrete findings, tagged by section:
-- **Needs Fixing** — blocking; reviewer asserts a real defect.
+Parse all collected feedback — structured reviews, inline diff threads, and failing CI checks alike — into discrete findings, tagged by section:
+- **Needs Fixing** — blocking; reviewer asserts a real defect. Every CI Failure from step 1.5 starts here by default — a red check is real until step 3 proves otherwise.
 - **Requires Human Review** — blocking; reviewer couldn't decide (a genuine tradeoff or missing context).
 - **Recommended Optional** — non-blocking improvement.
 - **Create Follow-up Issue** — out-of-scope, track separately.
 
-For free-form feedback with no sections — including inline diff comments — classify each point yourself into the same four buckets by its substance. Keep each finding atomic — split compound feedback ("fix X and also Y") into separate findings so each gets its own verdict. When the same defect is raised by more than one reviewer or thread, merge into one finding and note all sources.
+For free-form feedback with no sections — including inline diff comments — classify each point yourself into the same four buckets by its substance. Keep each finding atomic — split compound feedback ("fix X and also Y") into separate findings so each gets its own verdict. When the same defect is raised by more than one source — reviewer, thread, *or* a CI Failure finding from step 1.5 (e.g. a reviewer flags "this breaks the type check" while the type-check job is already `bucket: fail`) — merge into one finding and note all sources, including the check name alongside the reviewer(s).
 
 ### 3. Re-validate each finding against the code (the core step)
 
@@ -89,6 +105,7 @@ Validation discipline (this is where fixing a review goes wrong):
 - **Prove negatives by reading the path.** "X is never validated / never freed / not awaited" — confirm the absence across *all* relevant paths, not the one the reviewer looked at; the behavior may be produced elsewhere.
 - **A suggested fix is its own claim.** "Just add a lock here" can deadlock; "default it to N" can break a caller. Verify the *remedy* is correct for this codebase, not only that the *problem* exists. Derive the right fix from first principles if the suggested one is suboptimal — correctness and safety outrank matching the reviewer's wording.
 - **Safety carve-out:** any finding touching money, data integrity, security, or an auto-protective mechanism gets fixed or escalated to the user even at low confidence — never silently dropped as Refuted unless you can prove from code it's a non-issue.
+- **CI Failures validate differently — there's no reviewer to be wrong, only the log to explain.** Read the failing step's actual error/assertion, not just the job name. ✅ Confirmed if the failure traces to this PR's diff — fix it (and reproduce the exact failing command locally where feasible, so step 4's verification actually exercises it). ❌ Refuted only with evidence it's *not* this PR's doing — pre-existing on `<baseRefName>` (check CI history / reproduce on base) or a one-off infra flake (timeout/network blip unrelated to any path this PR touches) — don't patch around it; note it in the disposition and flag it to the user, since a flaky or broken base branch is worth knowing about independent of this PR.
 
 **For every ❓ Judgment finding, do the analysis the reviewer couldn't and implement the result — don't hand the tradeoff back.** Trace the code, enumerate the viable approaches, and derive the **absolute-best solution**, evaluated as if cost, effort, time, resources, token spend, and code volume were unlimited — they are *not* factors and must never narrow the option space. The only things that can override "best" are correctness and safety. Choose the most correct, most robust design even when it's far more work, then implement it (step 4) in this same run. Do **not** pause to ask the user. Record the decision in the disposition comment — the chosen solution, the code-grounded reasoning (`file:line`), and the rejected alternatives in one line each — so the human can override after the fact if they disagree.
 
@@ -183,7 +200,7 @@ Addressed review feedback (<reviewer(s)> · <timestamp(s)>) in <commit-sha>.
 1. **<finding title>** — <why it's out of scope; issue link filed>.
 ```
 
-Omit any empty section. Keep each item one line with a `file:line` anchor. For findings that came from inline diff threads, also post a one-line reply in the thread itself — use the root comment's `databaseId` from step 1's thread query: `gh api repos/{owner}/{repo}/pulls/<N>/comments/<databaseId>/replies -f body=...` — that's where the reviewer is watching. Post the main comment via:
+Omit any empty section. Keep each item one line with a `file:line` anchor. CI Failure findings slot into the same sections — fixed ones under **Fixed**, pre-existing/flaky ones under **Not changed (refuted)** with the base-branch or flake evidence in place of a code citation. For findings that came from inline diff threads, also post a one-line reply in the thread itself — use the root comment's `databaseId` from step 1's thread query: `gh api repos/{owner}/{repo}/pulls/<N>/comments/<databaseId>/replies -f body=...` — that's where the reviewer is watching. Post the main comment via:
 
 ```bash
 gh pr comment <N> --body-file <file>
@@ -200,7 +217,7 @@ Created with LLM: <current model> | <effort> | Harness: Claude Code
 
 Route the re-review by whether the set you addressed contained **any blocking finding** (noted in step 1) — never by the newest review's verdict alone: with multiple reviewers, a later `LGTM` from one does not erase another's `Needs Updates`.
 
-- **Any blocking finding addressed** (`Needs Fixing` / `Requires Human Review` from any review, or an inline thread that validated as a real defect): trigger plain — this repo's default (Opus) reviews the fix.
+- **Any blocking finding addressed** (`Needs Fixing` / `Requires Human Review` from any review, an inline thread that validated as a real defect, or any CI Failure finding from step 1.5 — **counted regardless of its verdict**, i.e. whether you fixed it or refuted it as pre-existing/flaky, exactly as the reviewer clauses count regardless of verdict): trigger plain — this repo's default (Opus) reviews the fix. A CI failure you refuted still routes here on purpose: if that refutation was wrong, the heavier Opus re-review is what catches the real regression you dismissed.
 - **Only non-blocking items** (optional improvements / follow-ups): the PR was already in good shape, so route the re-review to Sonnet via the `@claude sonnet` shorthand instead.
 
 Post a **separate** comment so the bot triggers cleanly on its own line:
@@ -227,7 +244,9 @@ Terse summary: which reviews/threads you acted on, counts per disposition (fixed
 | Suggested fix would touch money/data/security/auto-protective logic | Never blind-apply; verify the remedy from first principles and implement the safest correct design |
 | Reviewer's remedy is plausible but you can't confirm it's correct here | Don't implement on faith — trace it, then implement the absolute-best solution you can stand behind from the code |
 | A collected "review" is actually your own prior disposition comment or an `@claude review` trigger | Skip it; act only on *actual* review feedback |
-| Only some feedback channels checked (e.g. formal reviews but not inline diff threads) | Fetch all three sources before extracting findings — inline threads are where human reviewers usually comment |
+| Only some feedback channels checked (e.g. formal reviews but not inline diff threads or CI) | Fetch every review-feedback channel (step 1) and the CI snapshot (step 1.5) before extracting findings — inline threads are where human reviewers usually comment, and a red check is a finding too |
+| CI check's `bucket` is `pending` or `skipping` | Skip it — take the `gh pr checks` snapshot as-is, don't wait or poll; a run that finishes later gets caught on the next pass |
+| CI failure doesn't trace to this PR's diff (pre-existing on the base branch, or a one-off flake) | Don't fix around it — mark Refuted with the base-branch/flake evidence and flag it to the user; only fix failures this PR actually caused |
 | `git status` shows dirty files you didn't edit | Stage only your fix files; leave the rest and mention them in the report |
 | You're on `main` or a divergent branch, not the PR head | Check out the PR head first; never commit review fixes to the base branch |
 | Branch can't fast-forward to its upstream head | Stop — the branch diverged; surface to the user, don't force anything |
@@ -242,7 +261,9 @@ Terse summary: which reviews/threads you acted on, counts per disposition (fixed
 
 - **Blind-implementing the review.** Performative agreement ships regressions. Validate first, every time.
 - **Delegating validation.** Steps 2–3 always run inline — the model-selection gate keys off *validated* verdicts, and a lighter model triaging its own workload defeats the gate. Dispatch only steps 4–8, tiered by the most complex surviving fix (open judgment/safety → inline, any non-trivial fix → Opus, all-mechanical → Sonnet), and never split one review across subagents. The subagent's footers must name the model that actually ran, not the session model.
-- **Missing inline diff comments.** Fetching only formal reviews and issue comments skips the line-level threads where human reviewers usually comment. Fetch all three channels.
+- **Missing inline diff comments or CI.** Fetching only formal reviews and issue comments skips the line-level threads where human reviewers usually comment, and skipping step 1.5 misses failing CI checks. Fetch every channel in steps 1 and 1.5.
+- **Waiting or polling on in-progress CI.** Step 1.5 is a single snapshot; skip anything whose `bucket` is `pending` or `skipping` rather than blocking the run on it.
+- **Patching around a pre-existing or flaky CI failure.** Verify the failure traces to this PR's diff before touching code — otherwise it's Refuted with evidence, not a fix target.
 - **Addressing only the latest review when several landed.** Every review newer than your last disposition and every unresolved inline thread (any age) gets addressed.
 - **Routing the re-review by the newest verdict.** A later `LGTM` from one reviewer doesn't erase another's blocking findings — route by whether any blocking finding was addressed.
 - **`git add -A`.** Stage the fix files explicitly; a blanket add can commit unrelated dirty or untracked files.
